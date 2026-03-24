@@ -4,9 +4,11 @@ import os
 
 app = FastAPI()
 
-# 🔐 التوكنات من البيئة (Render Environment)
+# 🔐 التوكنات من Environment Variables في Render
 IG_TOKEN = os.getenv("IG_TOKEN")
 TELEGRAM_TOKEN = os.getenv("TG_TOKEN")
+
+# رابط تيليجرام الصحيح
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
 # 🔹 مسار رئيسي للاختبار
@@ -35,6 +37,7 @@ async def telegram_webhook(req: Request):
         # تجاهل الرسائل الغير نصية أو غير موجودة
         if "message" not in data:
             return {"ok": True}
+
         message = data["message"]
         chat_id = message["chat"]["id"]
         text = message.get("text", "")
@@ -62,10 +65,11 @@ async def telegram_webhook(req: Request):
 
         # إرسال الرد مع طباعة النتيجة لمراقبة الأخطاء
         try:
-            resp = requests.post(TELEGRAM_API, json={
-                "chat_id": chat_id,
-                "text": reply
-            }, timeout=5)
+            resp = requests.post(
+                TELEGRAM_API,
+                json={"chat_id": chat_id, "text": reply},
+                timeout=5
+            )
             print("📤 Telegram response:", resp.text)
         except Exception as e:
             print("❌ Telegram send error:", e)
