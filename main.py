@@ -1,8 +1,9 @@
 import os
 import requests
 import openai
-from flask import Flask, jsonify, request, make_response
+from flask import Flask, jsonify, request
 import threading
+import time
 from datetime import datetime
 import logging
 from dotenv import load_dotenv
@@ -20,7 +21,6 @@ app = Flask(__name__)
 PAGE_ACCESS_TOKEN = os.environ.get('PAGE_ACCESS_TOKEN')
 PAGE_ID = str(os.environ.get('PAGE_ID', '')).strip()
 OPENAI_KEY = os.environ.get('OPENAI_KEY')
-VERIFY_TOKEN = os.environ.get('VERIFY_TOKEN', 'orchid_bot_verify_123').strip()
 
 if OPENAI_KEY:
     openai.api_key = OPENAI_KEY
@@ -32,7 +32,9 @@ stats = {
     'last_activity': 'لا يوجد نشاط بعد',
     'recent_activities': [],
     'start_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    'bot_running': True
+    'bot_running': True,
+    'instagram_account_id': None,
+    'bot_mode': 'نظام الفحص الدوري (Polling)'
 }
 
 replied_ids = set()
@@ -59,69 +61,93 @@ def get_smart_reply(message_text):
         return "شكراً لتواصلك مع لمسة أوركيد ❤️ واتساب للطلب: 783200063"
 
 # ═══════════════════════════════════════════════════════════
-# Webhook Handling
+# وظائف البوت (Polling Mode)
 # ═══════════════════════════════════════════════════════════
 
-@app.route('/webhook', methods=['GET', 'POST'])
-def webhook():
-    if request.method == 'GET':
-        mode = request.args.get('hub.mode')
-        token = request.args.get('hub.verify_token')
-        challenge = request.args.get('hub.challenge')
-        if mode == 'subscribe' and token == VERIFY_TOKEN:
-            return make_response(str(challenge), 200)
-        return "Forbidden", 403
-
-    if request.method == 'POST':
-        data = request.json
-        if stats['bot_running']:
-            threading.Thread(target=process_payload, args=(data,)).start()
-        return "EVENT_RECEIVED", 200
-
-def process_payload(data):
-    global stats
+def get_instagram_account():
+    """جلب حساب Instagram المربوط بصفحة Facebook"""
     try:
-        if 'entry' in data:
-            for entry in data['entry']:
-                if 'messaging' in entry:
-                    for event in entry['messaging']:
-                        if 'sender' in event and 'message' in event:
-                            sender_id = str(event['sender']['id'])
-                            if sender_id == PAGE_ID: continue
-                            if 'text' in event['message']:
-                                mid = event['message']['id']
-                                if mid not in replied_ids:
-                                    msg_text = event['message']['text']
-                                    reply = get_smart_reply(msg_text)
-                                    send_reply(sender_id, reply)
-                                    replied_ids.add(mid)
-                                    stats['total_replies'] += 1
-                                    stats['total_messages'] += 1
-                                    update_history('رسالة', sender_id, msg_text, reply)
-
-                if 'changes' in entry:
-                    for change in entry['changes']:
-                        if change.get('field') in ['comments', 'comment']:
-                            val = change.get('value', {})
-                            cid = val.get('id')
-                            if cid and cid not in replied_ids:
-                                text = val.get('text', '')
-                                reply = get_smart_reply(text)
-                                send_comment_reply(cid, reply)
-                                replied_ids.add(cid)
-                                stats['total_replies'] += 1
-                                stats['total_comments'] += 1
-                                update_history('تعليق', val.get('from', {}).get('username', 'متابع'), text, reply)
+        url = f"https://graph.facebook.com/v21.0/{PAGE_ID}"
+        params = {'fields': 'instagram_business_account', 'access_token': PAGE_ACCESS_TOKEN}
+        res = requests.get(url, params=params).json()
+        if 'instagram_business_account' in res:
+            acc_id = res['instagram_business_account']['id']
+            stats['instagram_account_id'] = acc_id
+            return acc_id
     except Exception as e:
-        logger.error(f"Error in process_payload: {e}")
+        logger.error(f"Error getting IG account: {e}")
+    return None
 
-def send_reply(recipient_id, text):
-    url = f"https://graph.facebook.com/v21.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
-    requests.post(url, json={"recipient": {"id": recipient_id}, "message": {"text": text}})
+def check_instagram_comments():
+    ig_acc_id = get_instagram_account()
+    if not ig_acc_id: return
 
-def send_comment_reply(comment_id, text):
-    url = f"https://graph.facebook.com/v21.0/{comment_id}/replies?access_token={PAGE_ACCESS_TOKEN}"
-    requests.post(url, data={"message": text})
+    while True:
+        try:
+            # جلب آخر المنشورات
+            media_url = f"https://graph.facebook.com/v21.0/{ig_acc_id}/media"
+            res = requests.get(media_url, params={'access_token': PAGE_ACCESS_TOKEN}).json()
+
+            for post in res.get('data', []):
+                post_id = post['id']
+                # جلب الكومنتات لكل منشور
+                comments_url = f"https://graph.facebook.com/v21.0/{post_id}/comments"
+                c_res = requests.get(comments_url, params={'fields': 'id,text,from', 'access_token': PAGE_ACCESS_TOKEN}).json()
+
+                for comment in c_res.get('data', []):
+                    cid = comment['id']
+                    if cid not in replied_ids:
+                        text = comment.get('text', '')
+                        user = comment.get('from', {}).get('username', 'متابع')
+
+                        reply = get_smart_reply(text)
+                        # إرسال الرد
+                        reply_url = f"https://graph.facebook.com/v21.0/{cid}/replies"
+                        requests.post(reply_url, data={'message': reply, 'access_token': PAGE_ACCESS_TOKEN})
+
+                        replied_ids.add(cid)
+                        stats['total_replies'] += 1
+                        stats['total_comments'] += 1
+                        update_history('تعليق انستغرام', user, text, reply)
+
+            time.sleep(60) # فحص كل دقيقة
+        except Exception as e:
+            logger.error(f"IG Polling Error: {e}")
+            time.sleep(30)
+
+def check_facebook_messages():
+    while True:
+        try:
+            conv_url = f"https://graph.facebook.com/v21.0/{PAGE_ID}/conversations"
+            res = requests.get(conv_url, params={'access_token': PAGE_ACCESS_TOKEN}).json()
+
+            for conv in res.get('data', []):
+                conv_id = conv['id']
+                msg_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
+                m_res = requests.get(msg_url, params={'fields': 'id,message,from', 'access_token': PAGE_ACCESS_TOKEN}).json()
+
+                if m_res.get('data'):
+                    last_msg = m_res['data'][0]
+                    mid = last_msg['id']
+                    sender_id = last_msg['from']['id']
+
+                    if sender_id != PAGE_ID and mid not in replied_ids:
+                        text = last_msg.get('message', '')
+                        reply = get_smart_reply(text)
+
+                        # إرسال الرد
+                        send_url = f"https://graph.facebook.com/v21.0/{conv_id}/messages"
+                        requests.post(send_url, json={'message': reply, 'access_token': PAGE_ACCESS_TOKEN})
+
+                        replied_ids.add(mid)
+                        stats['total_replies'] += 1
+                        stats['total_messages'] += 1
+                        update_history('رسالة فيسبوك', last_msg['from']['name'], text, reply)
+
+            time.sleep(60)
+        except Exception as e:
+            logger.error(f"FB Polling Error: {e}")
+            time.sleep(30)
 
 def update_history(type, user, msg, reply):
     global stats
@@ -141,7 +167,7 @@ def dashboard():
         <div class="activity-card">
             <div class="activity-header">
                 <div class="user-info">
-                    <div class="user-avatar">{a['user'][0].upper()}</div>
+                    <div class="user-avatar">{a['user'][0].upper() if a['user'] else '?'}</div>
                     <div>
                         <div class="username">{a['user']}</div>
                         <div class="time">{a['time']}</div>
@@ -150,7 +176,7 @@ def dashboard():
                 <div class="badge">{a['type']}</div>
             </div>
             <div class="activity-body">
-                <div class="msg-box"><b>التعليق:</b><br>{a['msg']}</div>
+                <div class="msg-box"><b>المحتوى:</b><br>{a['msg']}</div>
                 <div class="reply-box"><b>🤖 رد البوت:</b><br>{a['reply']}</div>
             </div>
         </div>
@@ -271,12 +297,6 @@ def dashboard():
                 font-size: 30px;
             }}
             .status-on {{ border-color: #2ecc71; color: #2ecc71; }}
-            .btn-toggle {{
-                background: linear-gradient(to right, var(--primary), var(--secondary));
-                color: white; border: none; padding: 12px 30px; border-radius: 30px;
-                font-family: 'Tajawal'; font-weight: bold; cursor: pointer; width: 100%;
-            }}
-
             .info-item {{ display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f9f9f9; font-size: 14px; }}
             .info-label {{ color: #95a5a6; }}
         </style>
@@ -286,10 +306,10 @@ def dashboard():
             <div class="logo-section">
                 <div class="logo-icon">✨</div>
                 <div class="logo-text">لمسة أوركيد</div>
-                <div style="font-size: 12px; color: #999; margin-top: 5px;">لوحة تحكم بوت الانستغرام الذكي</div>
+                <div style="font-size: 12px; color: #999; margin-top: 5px;">لوحة تحكم بوت الذكاء الاصطناعي</div>
             </div>
             <div style="background: #f8f9fe; padding: 8px 15px; border-radius: 10px; font-size: 14px;">
-                🟢 البوت يعمل
+                🟢 {stats['bot_mode']}
             </div>
         </nav>
 
@@ -320,13 +340,12 @@ def dashboard():
 
             <div class="sidebar">
                 <div class="sidebar-card">
-                    <h3>🤖 التحكم بالبوت</h3>
+                    <h3>🤖 حالة البوت</h3>
                     <div class="bot-status-ui">
                         <div class="status-circle status-on">✔️</div>
                         <h4>يعمل</h4>
-                        <p style="font-size: 12px; color: #999;">البوت يقوم بالرد آلياً حالياً</p>
+                        <p style="font-size: 12px; color: #999;">البوت يقوم بالفحص الدوري كل دقيقة</p>
                     </div>
-                    <button class="btn-toggle">تشغيل البوت</button>
                 </div>
 
                 <div class="sidebar-card" style="text-align: right;">
@@ -336,19 +355,14 @@ def dashboard():
                         <span>{PAGE_ID[:10]}...</span>
                     </div>
                     <div class="info-item">
-                        <span class="info-label">آخر تحقق</span>
-                        <span>{stats['last_activity'] if stats['last_activity'] != 'لا يوجد نشاط بعد' else 'لم يتم بعد'}</span>
-                    </div>
-                    <div style="margin-top: 20px; text-align: center;">
-                        <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Instagram_icon.png" width="20" style="vertical-align: middle;">
-                        <span style="font-size: 12px; color: var(--primary);">متصل بـ Instagram</span>
+                        <span class="info-label">آخر نشاط</span>
+                        <span>{stats['last_activity']}</span>
                     </div>
                 </div>
             </div>
         </div>
 
         <script>
-            // تحديث تلقائي كل 30 ثانية
             setTimeout(() => {{ location.reload(); }}, 30000);
         </script>
     </body>
@@ -356,5 +370,9 @@ def dashboard():
     """
 
 if __name__ == '__main__':
+    # تشغيل خيوط الفحص الدوري بدلاً من Webhook
+    threading.Thread(target=check_instagram_comments, daemon=True).start()
+    threading.Thread(target=check_facebook_messages, daemon=True).start()
+
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
