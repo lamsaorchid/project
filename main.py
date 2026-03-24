@@ -1,31 +1,35 @@
 from fastapi import FastAPI, Request
 import requests
 import os
+import openai  # إذا أردت دعم AI
 
 app = FastAPI()
 
-# 🔐 التوكنات
-IG_TOKEN = os.getenv("IG_TOKEN")
+# 🔐 التوكنات من Environment
+IG_ACCOUNT_ID = os.getenv("IG_ACCOUNT_ID")  # رقم الحساب البيزنس على إنستغرام
+IG_TOKEN = os.getenv("IG_TOKEN")  # توكن Facebook Graph API v25.0
 TELEGRAM_TOKEN = os.getenv("TG_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # اختياري للردود AI
+openai.api_key = OPENAI_API_KEY
+
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-# 🔹 مسار رئيسي
 @app.get("/")
 def home():
-    return {"message": "🔥 Advanced AI Bot is working"}
+    return {"message": "🔥 AI Bot with Facebook Graph API is online"}
 
-# 🔹 API لجلب بيانات الحساب الانستغرام
+# 🔹 جلب بيانات الحساب
 @app.get("/instagram")
 def get_instagram():
-    url = "https://graph.instagram.com/me"
-    params = {"fields": "id,username,media_count", "access_token": IG_TOKEN}
+    url = f"https://graph.facebook.com/v25.0/{IG_ACCOUNT_ID}"
+    params = {"fields": "username,media_count", "access_token": IG_TOKEN}
     r = requests.get(url, params=params)
     return r.json()
 
-# 🔹 API لجلب آخر 5 منشورات
+# 🔹 جلب آخر 5 منشورات
 @app.get("/instagram/latest")
 def latest_instagram_posts():
-    url = "https://graph.instagram.com/me/media"
+    url = f"https://graph.facebook.com/v25.0/{IG_ACCOUNT_ID}/media"
     params = {
         "fields": "id,caption,media_type,media_url,permalink,timestamp",
         "access_token": IG_TOKEN,
@@ -34,7 +38,7 @@ def latest_instagram_posts():
     r = requests.get(url, params=params).json()
     return r
 
-# 🔹 Webhook تيليجرام مع أوامر ذكية
+# 🔹 Webhook تيليجرام
 @app.post("/webhook")
 async def telegram_webhook(req: Request):
     data = await req.json()
@@ -50,14 +54,14 @@ async def telegram_webhook(req: Request):
         if not text:
             return {"ok": True}
 
-        reply = "استخدم /latest أو /ig"
+        reply = "استخدم /ig أو /latest أو ارسل أي سؤال للبوت AI"
 
         if text == "/start":
-            reply = "🔥 البوت المتقدم يعمل بنجاح"
+            reply = "🔥 البوت يعمل بنجاح! يمكنك الآن إدارة صفحتك عبر تيليجرام."
 
         elif text == "/ig":
-            url = "https://graph.instagram.com/me"
-            params = {"fields": "id,username,media_count", "access_token": IG_TOKEN}
+            url = f"https://graph.facebook.com/v25.0/{IG_ACCOUNT_ID}"
+            params = {"fields": "username,media_count", "access_token": IG_TOKEN}
             r = requests.get(url, params=params).json()
             if "username" in r:
                 reply = f"👤 حسابك: {r['username']}\nعدد المنشورات: {r['media_count']}"
@@ -65,7 +69,7 @@ async def telegram_webhook(req: Request):
                 reply = "❌ خطأ في التوكن أو الحساب"
 
         elif text == "/latest":
-            url = "https://graph.instagram.com/me/media"
+            url = f"https://graph.facebook.com/v25.0/{IG_ACCOUNT_ID}/media"
             params = {
                 "fields": "id,caption,media_type,media_url,permalink,timestamp",
                 "access_token": IG_TOKEN,
@@ -78,10 +82,24 @@ async def telegram_webhook(req: Request):
             else:
                 reply = ""
                 for p in posts:
-                    media_type = p.get("media_type")
                     caption = p.get("caption", "بدون وصف")
                     permalink = p.get("permalink")
                     reply += f"📌 {caption}\n{permalink}\n\n"
+        else:
+            # أي رسالة أخرى → رد AI
+            try:
+                ai_response = openai.ChatCompletion.create(
+                    model="gpt-4",
+                    messages=[
+                        {"role": "system", "content": "أنت مساعد ذكي باللغة العربية"},
+                        {"role": "user", "content": text}
+                    ],
+                    max_tokens=300
+                )
+                reply = ai_response['choices'][0]['message']['content']
+            except Exception as e:
+                print("❌ AI error:", e)
+                reply = "حدث خطأ أثناء معالجة طلبك."
 
         # إرسال الرد للبوت
         try:
